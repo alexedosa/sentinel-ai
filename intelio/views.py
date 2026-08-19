@@ -1,3 +1,4 @@
+import json
 import os
 
 from dotenv import load_dotenv
@@ -9,6 +10,7 @@ from rest_framework.response import Response
 
 from .models import Activity, ProjectState
 from .services.context import build_context
+from .services.github import get_recent_commits
 
 load_dotenv()
 
@@ -47,11 +49,23 @@ ACTIVITY_SCHEMA = {
 }
 
 
-
 @api_view(["POST"])
 def intelligence(request):
     
-    user_request = request.data.get("request")
+    data = request.data
+    user_request = None
+
+    if isinstance(data, str):
+        try:
+            parsed = json.loads(data)
+            if isinstance(parsed, dict):
+                user_request = parsed.get("request")
+            else:
+                user_request = data
+        except Exception:
+            user_request = data
+    elif isinstance(data, dict):
+        user_request = data.get("request")
 
     if not user_request:
         return Response(
@@ -59,35 +73,51 @@ def intelligence(request):
             status=400
         )
 
-    context = build_context()
+    memory = build_context()
+
+    github_activity = get_recent_commits(
+        "alexedosa",
+        "sentinel-ai"
+    )
 
     prompt = f"""
 You are Sentinel, an intelligent personal development intelligence system.
 
 
 USER:
-Muzan
+Alex
 
 
 CURRENT PROJECT:
 Sentinel
 
 
-CONTEXT:
-{context}
+RECENT DATABASE MEMORY:
+{memory}
+
+
+RECENT GITHUB ACTIVITY:
+{github_activity}
 
 
 CURRENT USER REQUEST:
 {user_request}
 
 
-Understand the user's current activity using the available context.
+Understand the user's current activity using BOTH their stated request
+and the available evidence from memory and GitHub.
 
 
 Rules:
+
+
 - Do not invent information.
-- Use memory only when relevant.
-- Detect contradictions or changes in direction.
+- Do not assume unrelated activities are connected.
+- Use database memory when relevant.
+- Use GitHub activity as evidence of actual development activity.
+- If the user's statement conflicts with available evidence, identify the
+  discrepancy rather than blindly accepting the statement.
+- Detect changes in direction.
 - Determine the user's current activity.
 - Return structured information.
 """
