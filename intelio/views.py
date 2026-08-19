@@ -7,6 +7,8 @@ from google.genai import types
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
+from .models import Activity, ProjectState
+from .services.context import build_context
 
 load_dotenv()
 
@@ -16,82 +18,78 @@ client = genai.Client(
 )
 
 
-CONTENT_SCHEMA = {
+ACTIVITY_SCHEMA = {
     "type": "OBJECT",
     "properties": {
-        "ideas": {
-            "type": "ARRAY",
-            "items": {
-                "type": "OBJECT",
-                "properties": {
-                    "title": {"type": "STRING"},
-                    "content_angle": {"type": "STRING"},
-                    "platform": {"type": "STRING"},
-                    "format": {"type": "STRING"},
-                    "visual": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "type": {"type": "STRING"},
-                            "reason": {"type": "STRING"},
-                        },
-                        "required": ["type", "reason"],
-                    },
-                },
-                "required": [
-                    "title",
-                    "content_angle",
-                    "platform",
-                    "format",
-                    "visual",
-                ],
-            },
+        "activity": {
+            "type": "STRING"
+        },
+        "subject": {
+            "type": "STRING"
+        },
+        "project": {
+            "type": "STRING"
+        },
+        "status": {
+            "type": "STRING"
+        },
+        "summary": {
+            "type": "STRING"
         }
     },
-    "required": ["ideas"],
+    "required": [
+        "activity",
+        "subject",
+        "project",
+        "status",
+        "summary"
+    ]
 }
+
 
 
 @api_view(["POST"])
 def intelligence(request):
-
+    
     user_request = request.data.get("request")
 
     if not user_request:
         return Response(
             {"error": "A 'request' field is required."},
-            status=400,
+            status=400
         )
 
-    context = {
-        "name": "Alex",
-        "role": "Developer building in public",
-        "current_project": "Sentinel",
-        "project_goal": "Build a personal AI-powered content management system",
-        "content_goal": "Build a developer community around working with AI",
-        "preferred_platforms": ["LinkedIn", "Instagram"],
-    }
+    context = build_context()
 
     prompt = f"""
-You are Sentinel, an intelligent personal content strategist.
+You are Sentinel, an intelligent personal development intelligence system.
 
-USER CONTEXT:
+
+USER:
+Muzan
+
+
+CURRENT PROJECT:
+Sentinel
+
+
+CONTEXT:
 {context}
 
-USER REQUEST:
+
+CURRENT USER REQUEST:
 {user_request}
 
-Using the context above, fulfill the user's request.
 
-Generate exactly 3 strong content opportunities.
+Understand the user's current activity using the available context.
 
-The opportunities should be:
-- specific to the user's actual journey
-- authentic
-- non-generic
-- suitable for the selected platform
-- based only on information actually provided
 
-Do not invent projects, features, achievements, or experiences.
+Rules:
+- Do not invent information.
+- Use memory only when relevant.
+- Detect contradictions or changes in direction.
+- Determine the user's current activity.
+- Return structured information.
 """
 
     response = client.models.generate_content(
@@ -99,8 +97,35 @@ Do not invent projects, features, achievements, or experiences.
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
-            response_schema=CONTENT_SCHEMA,
+            response_schema=ACTIVITY_SCHEMA,
         ),
     )
 
-    return Response(response.parsed)
+    activity = response.parsed
+
+    saved_activity = Activity.objects.create(
+        project=activity["project"],
+        activity_type=activity["activity"],
+        subject=activity["subject"],
+        status=activity["status"],
+        summary=activity["summary"],
+    )
+
+    ProjectState.objects.update_or_create(
+        project=activity["project"],
+        defaults={
+            "current_focus": activity["subject"],
+            "status": activity["status"],
+            "summary": activity["summary"],
+        },
+    )
+
+    return Response({
+        "id": saved_activity.id,
+        "activity": saved_activity.activity_type,
+        "subject": saved_activity.subject,
+        "project": saved_activity.project,
+        "status": saved_activity.status,
+        "summary": saved_activity.summary,
+        "created_at": saved_activity.created_at,
+    })
