@@ -1,38 +1,45 @@
-from ..models import Activity, ProjectState
+from intelio.models import Activity, ProjectState, UserSignal
 
 
-def build_context(project="Sentinel", limit=10):
+def build_context():
+    activities = Activity.objects.order_by("-occurred_at")[:20]
+    signals = UserSignal.objects.order_by("-created_at")[:20]
+    project_states = ProjectState.objects.all()
 
-    recent_activities = (
-        Activity.objects
-        .order_by("-created_at")[:limit]
-    )
+    github_activity = []
 
-    project_state = ProjectState.objects.filter(
-        project=project
-    ).first()
+    for activity in activities:
+        github_activity.append({
+            "external_id": activity.external_id,
+            "repository": activity.repository,
+            "project": activity.project,
+            "activity": activity.activity_type,
+            "subject": activity.subject,
+            "summary": activity.summary,
+            "occurred_at": activity.occurred_at.isoformat(),
+        })
+
+    user_signals = []
+
+    for signal in signals:
+        user_signals.append({
+            "request": signal.request,
+            "created_at": signal.created_at.isoformat(),
+        })
+
+    current_projects = []
+
+    for state in project_states:
+        current_projects.append({
+            "project": state.project,
+            "current_focus": state.current_focus,
+            "status": state.status,
+            "summary": state.summary,
+            "updated_at": state.updated_at.isoformat(),
+        })
 
     return {
-        "project_state": (
-            {
-                "project": project_state.project,
-                "current_focus": project_state.current_focus,
-                "status": project_state.status,
-                "summary": project_state.summary,
-                "updated_at": project_state.updated_at.isoformat(),
-            }
-            if project_state
-            else None
-        ),
-        "recent_activities": [
-            {
-                "project": activity.project,
-                "activity": activity.activity_type,
-                "subject": activity.subject,
-                "status": activity.status,
-                "summary": activity.summary,
-                "created_at": activity.created_at.isoformat(),
-            }
-            for activity in recent_activities
-        ],
+        "github_activity": github_activity,
+        "user_signals": user_signals,
+        "current_projects": current_projects,
     }

@@ -1,69 +1,34 @@
 import json
-import os
-
-from dotenv import load_dotenv
-from google import genai
-from google.genai import types
 
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from .models import Activity, ProjectState
+from .models import UserSignal
 from .services.context import build_context
-from .services.github import get_recent_commits
-
-load_dotenv()
-
-
-client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY")
-)
-
-
-ACTIVITY_SCHEMA = {
-    "type": "OBJECT",
-    "properties": {
-        "activity": {
-            "type": "STRING"
-        },
-        "subject": {
-            "type": "STRING"
-        },
-        "project": {
-            "type": "STRING"
-        },
-        "status": {
-            "type": "STRING"
-        },
-        "summary": {
-            "type": "STRING"
-        }
-    },
-    "required": [
-        "activity",
-        "subject",
-        "project",
-        "status",
-        "summary"
-    ]
-}
+from .services.decision import finalize_decision
+from .services.evidence import build_evidence
+from .services.intelligence import analyze_evidence
+from .services.sync import sync_github
 
 
 @api_view(["POST"])
 def intelligence(request):
-    
+
     data = request.data
     user_request = None
 
     if isinstance(data, str):
         try:
             parsed = json.loads(data)
+
             if isinstance(parsed, dict):
                 user_request = parsed.get("request")
             else:
                 user_request = data
+
         except Exception:
             user_request = data
+
     elif isinstance(data, dict):
         user_request = data.get("request")
 
@@ -73,89 +38,50 @@ def intelligence(request):
             status=400
         )
 
-    memory = build_context()
-
-    github_activity = get_recent_commits(
-        "alexedosa",
-        "sentinel-ai"
+    # Store exactly what the user explicitly said.
+    user_signal = UserSignal.objects.create(
+        request=user_request
     )
 
-    prompt = f"""
-You are Sentinel, an intelligent personal development intelligence system.
+    # Sync factual development activity from GitHub.
+    sync_result = sync_github()
 
+    # Build Sentinel's current context from stored data.
+    context = build_context()
 
-USER:
-Alex
-
-
-CURRENT PROJECT:
-Sentinel
-
-
-RECENT DATABASE MEMORY:
-{memory}
-
-
-RECENT GITHUB ACTIVITY:
-{github_activity}
-
-
-CURRENT USER REQUEST:
-{user_request}
-
-
-Understand the user's current activity using BOTH their stated request
-and the available evidence from memory and GitHub.
-
-
-Rules:
-
-
-- Do not invent information.
-- Do not assume unrelated activities are connected.
-- Use database memory when relevant.
-- Use GitHub activity as evidence of actual development activity.
-- If the user's statement conflicts with available evidence, identify the
-  discrepancy rather than blindly accepting the statement.
-- Detect changes in direction.
-- Determine the user's current activity.
-- Return structured information.
-"""
-
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=ACTIVITY_SCHEMA,
-        ),
+    # Compare the user's statement against available evidence.
+    evidence = build_evidence(
+        user_request,
+        context
     )
 
-    activity = response.parsed
+    # Let the intelligence layer interpret the evidence.
+    decision = analyze_evidence(evidence)
 
-    saved_activity = Activity.objects.create(
-        project=activity["project"],
-        activity_type=activity["activity"],
-        subject=activity["subject"],
-        status=activity["status"],
-        summary=activity["summary"],
-    )
-
-    ProjectState.objects.update_or_create(
-        project=activity["project"],
-        defaults={
-            "current_focus": activity["subject"],
-            "status": activity["status"],
-            "summary": activity["summary"],
-        },
+    decision = finalize_decision(
+        decision,
+        evidence
     )
 
     return Response({
-        "id": saved_activity.id,
-        "activity": saved_activity.activity_type,
-        "subject": saved_activity.subject,
-        "project": saved_activity.project,
-        "status": saved_activity.status,
-        "summary": saved_activity.summary,
-        "created_at": saved_activity.created_at,
+        "signal_id": user_signal.id,
+
+        "sync": {
+            "created": len(sync_result["created"]),
+            "skipped": len(sync_result["skipped"]),
+        },
+
+        "activity": decision["activity"],
+        "subject": decision["subject"],
+        "project": decision["project"],
+        "status": decision["status"],
+        "intent_confidence": decision["intent_confidence"],
+        "evidence_confidence": decision["evidence_confidence"],
+        "project_confidence": decision["project_confidence"],
+        "alignment": decision["alignment"],
+        "evidence": decision["evidence"],
+        "recommendation": decision["recommendation"],
+        "summary": decision["summary"],
+
+        "created_at": user_signal.created_at,
     })

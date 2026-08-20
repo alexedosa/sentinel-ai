@@ -28,6 +28,7 @@ def get_recent_commits(username, repository_name, limit=10):
             "date": commit.commit.author.date.isoformat()
             if commit.commit.author
             else None,
+            "repository": repository.full_name,
         }
         for commit in commits[:limit]
     ]
