@@ -76,32 +76,6 @@ The LLM interprets those signals rather than treating its interpretation as fact
 
 The LLM integration is abstracted behind a service layer so Sentinel is not tightly coupled to a single provider.
 
-## Project Structure
-
-sentinel/
-├── config/
-│   └── Django project configuration
-│
-├── intelio/
-│   ├── models.py
-│   ├── views.py
-│   │
-│   └── services/
-│       ├── context.py
-│       ├── evidence.py
-│       ├── intelligence.py
-│       ├── decision.py
-│       ├── project.py
-│       ├── project_state.py
-│       ├── github.py
-│       ├── sync.py
-│       ├── signals.py
-│       └── llm.py
-│
-├── manage.py
-└── .env
-
-The services layer contains Sentinel's core intelligence pipeline. Django provides the application, persistence, and API layer around it.
 
 ## Getting Started
 
