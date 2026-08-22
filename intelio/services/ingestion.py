@@ -2,6 +2,16 @@ from intelio.models import Activity
 
 
 def ingest_github_commits(commits):
+    """
+    Persist normalized GitHub commits as Activity records.
+
+    GitHub commit SHA is treated as the external identity, making ingestion
+    idempotent. Existing commits are skipped rather than duplicated.
+
+    This layer only persists factual GitHub data. Project classification and
+    intelligence decisions belong to higher-level services.
+    """
+
     created = []
     skipped = []
 
@@ -18,7 +28,7 @@ def ingest_github_commits(commits):
             external_id=external_id,
             source=Activity.SOURCE_GITHUB,
             repository=commit["repository"],
-            project="Sentinel",
+            project="Unspecified",
             activity_type="commit",
             subject=commit["message"],
             summary=commit["message"],

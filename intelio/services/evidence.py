@@ -26,15 +26,34 @@ STOP_WORDS = {
     "working",
     "continue",
     "continuing",
+    "want",
+    "need",
+    "trying",
+    "going",
 }
 
 
-def _tokenize(text):
+MAX_EVIDENCE_PER_SOURCE = 5
+
+RELEVANCE_THRESHOLD = 0.20
+
+
+def tokenize(text):
+    """
+    Normalize text into meaningful lowercase tokens.
+
+    This is intentionally deterministic. A more advanced semantic
+    retrieval implementation can replace this later without changing
+    the evidence contract.
+    """
+
+    if not text:
+        return set()
+
     words = re.findall(
         r"[a-zA-Z0-9]+",
-        text.lower()
+        str(text).lower(),
     )
-
 
     return {
         word
@@ -44,61 +63,172 @@ def _tokenize(text):
     }
 
 
-def _similarity(a, b):
+def _similarity(left, right):
+    if not left or not right:
+        return 0.0
+
     return SequenceMatcher(
         None,
-        a.lower(),
-        b.lower(),
+        str(left).lower(),
+        str(right).lower(),
     ).ratio()
 
 
-def _is_relevant(user_request, text):
-    if not user_request or not text:
-        return False
-
-    request_tokens = _tokenize(user_request)
-    text_tokens = _tokenize(text)
-
-    if not request_tokens or not text_tokens:
-        return False
+def _token_overlap(request_tokens, evidence_tokens):
+    if not request_tokens or not evidence_tokens:
+        return 0.0
 
     overlap = request_tokens.intersection(
-        text_tokens
+        evidence_tokens
     )
 
-    if overlap:
-        return True
+    if not overlap:
+        return 0.0
 
-    similarity = _similarity(
+    return len(overlap) / len(request_tokens)
+
+
+def _relevance_score(user_request, searchable_text):
+    """
+    Produce a deterministic relevance score between 0 and 1.
+
+    Token overlap is the primary signal. Text similarity provides
+    supporting evidence when wording differs slightly.
+    """
+
+    if not user_request or not searchable_text:
+        return 0.0
+
+    request_tokens = tokenize(user_request)
+    evidence_tokens = tokenize(searchable_text)
+
+    if not request_tokens or not evidence_tokens:
+        return 0.0
+
+    overlap_score = _token_overlap(
+        request_tokens,
+        evidence_tokens,
+    )
+
+    similarity_score = _similarity(
         user_request,
-        text,
+        searchable_text,
     )
 
-    return similarity >= 0.70
+    return min(
+        1.0,
+        (overlap_score * 0.75)
+        + (similarity_score * 0.25),
+    )
 
 
-def _derive_evidence_level(
-    github_evidence,
-    project_state,
+def _rank_candidates(
+    user_request,
+    candidates,
+    text_builder,
+    source,
 ):
-    total = (
-        len(github_evidence)
-        + len(project_state)
+    """
+    Score and rank candidate evidence records.
+
+    Records below the relevance threshold are discarded.
+    """
+
+    ranked = []
+
+    for candidate in candidates:
+        searchable_text = text_builder(candidate)
+
+        relevance = _relevance_score(
+            user_request,
+            searchable_text,
+        )
+
+        if relevance < RELEVANCE_THRESHOLD:
+            continue
+
+        ranked.append({
+            "source": source,
+            "relevance": round(
+                relevance,
+                3,
+            ),
+            "data": candidate,
+        })
+
+    ranked.sort(
+        key=lambda item: item["relevance"],
+        reverse=True,
     )
 
-    if total == 0:
+    return ranked[:MAX_EVIDENCE_PER_SOURCE]
+
+
+def _github_text(activity):
+    return " ".join(
+        [
+            activity.get("project", ""),
+            activity.get("repository", ""),
+            activity.get("activity", ""),
+            activity.get("subject", ""),
+            activity.get("summary", ""),
+        ]
+    )
+
+
+def _signal_text(signal):
+    return signal.get(
+        "request",
+        "",
+    )
+
+
+def _project_text(project):
+    return " ".join(
+        [
+            project.get("project", ""),
+            project.get("current_focus", ""),
+            project.get("status", ""),
+            project.get("summary", ""),
+        ]
+    )
+
+
+def _derive_evidence_level(evidence):
+    """
+    Derive an overall evidence level from the strongest available
+    relevance score rather than simply counting records.
+    """
+
+    if not evidence:
         return "none"
 
-    if total >= 3:
+    strongest = max(
+        item["relevance"]
+        for item in evidence
+    )
+
+    if strongest >= 0.70:
         return "strong"
 
-    return "some"
+    if strongest >= 0.40:
+        return "moderate"
+
+    return "weak"
 
 
 def build_evidence(
     user_request,
     context,
 ):
+    """
+    Retrieve and rank evidence relevant to the user's request.
+
+    This service is responsible for retrieval and evidence packaging.
+    It does not decide intent, alignment, project direction, or
+    recommendations.
+    """
+
     github_activity = context.get(
         "github_activity",
         [],
@@ -114,54 +244,44 @@ def build_evidence(
         [],
     )
 
-    relevant_github = []
+    github_evidence = _rank_candidates(
+        user_request,
+        github_activity,
+        _github_text,
+        "github",
+    )
 
-    for activity in github_activity:
-        searchable_text = " ".join([
-            activity.get("project", ""),
-            activity.get("activity", ""),
-            activity.get("subject", ""),
-            activity.get("summary", ""),
-        ])
+    user_history = _rank_candidates(
+        user_request,
+        user_signals,
+        _signal_text,
+        "user_history",
+    )
 
-        if _is_relevant(
-            user_request,
-            searchable_text,
-        ):
-            relevant_github.append(activity)
+    project_state = _rank_candidates(
+        user_request,
+        current_projects,
+        _project_text,
+        "project_state",
+    )
 
-    relevant_signals = []
+    all_evidence = (
+        github_evidence
+        + user_history
+        + project_state
+    )
 
-    for signal in user_signals:
-        if _is_relevant(
-            user_request,
-            signal.get("request", ""),
-        ):
-            relevant_signals.append(signal)
-
-    relevant_projects = []
-
-    for project in current_projects:
-        searchable_text = " ".join([
-            project.get("project", ""),
-            project.get("current_focus", ""),
-            project.get("status", ""),
-            project.get("summary", ""),
-        ])
-
-        if _is_relevant(
-            user_request,
-            searchable_text,
-        ):
-            relevant_projects.append(project)
+    all_evidence.sort(
+        key=lambda item: item["relevance"],
+        reverse=True,
+    )
 
     return {
         "user_request": user_request,
-        "github_evidence": relevant_github,
-        "user_history": relevant_signals,
-        "project_state": relevant_projects,
+        "github_evidence": github_evidence,
+        "user_history": user_history,
+        "project_state": project_state,
         "evidence_level": _derive_evidence_level(
-            relevant_github,
-            relevant_projects,
+            all_evidence
         ),
     }

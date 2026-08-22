@@ -1,130 +1,249 @@
-from intelio.services.evidence import _tokenize
+from intelio.services.evidence import tokenize
 
 
-def resolve_project(user_request, context):
-    """
-    Attempt to identify which known project a user request belongs to.
+UNKNOWN_PROJECT = None
 
-    Rules:
-    - Explicit project name in the request is the strongest signal.
-    - ProjectState records may provide supporting evidence.
-    - Recent GitHub Activity may provide supporting evidence.
-    - Never force a project assignment when evidence is insufficient.
-    - Never map a technical concept to a project without direct evidence.
-    - Deterministic. No LLM.
-    """
+LOW_CONFIDENCE = "low"
+MEDIUM_CONFIDENCE = "medium"
+HIGH_CONFIDENCE = "high"
 
-    project_states = context.get("current_projects", [])
-    github_activity = context.get("github_activity", [])
+IGNORED_PROJECT_NAMES = {
+    "",
+    "unspecified",
+}
 
-    known_projects = {
-        state["project"]
-        for state in project_states
-        if state.get("project")
-    }
 
-    # Also collect project names from GitHub activity.
-    for activity in github_activity:
-        project = activity.get("project")
+def _clean_project_name(project):
+    if project is None:
+        return None
+
+    project = str(project).strip()
+
+    if project.lower() in IGNORED_PROJECT_NAMES:
+        return None
+
+    return project
+
+
+def _collect_known_projects(context):
+    projects = set()
+
+    for state in context.get("current_projects", []):
+        project = _clean_project_name(
+            state.get("project")
+        )
+
         if project:
-            known_projects.add(project)
+            projects.add(project)
 
-    known_projects.discard(None)
-    known_projects.discard("")
-    known_projects.discard("Unspecified")
+    for activity in context.get("github_activity", []):
+        project = _clean_project_name(
+            activity.get("project")
+        )
 
-    if not known_projects:
-        return {
-            "project": None,
-            "confidence": "low",
-            "reason": "No known projects in evidence.",
-        }
+        if project:
+            projects.add(project)
 
-    # Step 1: Check for an explicit project name mention in the request.
-    request_lower = user_request.lower()
+    return projects
 
-    explicitly_named = []
 
-    for project in known_projects:
-        if project.lower() in request_lower:
-            explicitly_named.append(project)
+def _project_is_explicitly_named(
+    user_request,
+    project,
+):
+    request_tokens = tokenize(user_request)
+    project_tokens = tokenize(project)
 
-    if len(explicitly_named) == 1:
-        return {
-            "project": explicitly_named[0],
-            "confidence": "high",
-            "reason": (
-                f"Project '{explicitly_named[0]}' is explicitly "
-                f"named in the user request."
-            ),
-        }
+    if not request_tokens or not project_tokens:
+        return False
 
-    if len(explicitly_named) > 1:
-        return {
-            "project": None,
-            "confidence": "low",
-            "reason": "Multiple projects explicitly named in request.",
-        }
+    return project_tokens.issubset(
+        request_tokens
+    )
 
-    # Step 2: No explicit mention. Check if GitHub evidence
-    # connects the request tokens to a specific project's activity.
-    request_tokens = _tokenize(user_request)
 
-    if not request_tokens:
-        return {
-            "project": None,
-            "confidence": "low",
-            "reason": "No reliable project evidence.",
-        }
-
-    project_scores = {}
-
-    for activity in github_activity:
-        project = activity.get("project")
-
-        if not project or project == "Unspecified":
-            continue
-
-        activity_text = " ".join([
-            activity.get("subject", ""),
-            activity.get("summary", ""),
-            activity.get("activity", ""),
-        ])
-
-        activity_tokens = _tokenize(activity_text)
-
-        overlap = request_tokens.intersection(activity_tokens)
-
-        if overlap:
-            project_scores[project] = (
-                project_scores.get(project, 0) + len(overlap)
-            )
-
-    if not project_scores:
-        return {
-            "project": None,
-            "confidence": "low",
-            "reason": "No reliable project evidence.",
-        }
-
-    max_score = max(project_scores.values())
-    top_projects = [
-        p for p, score in project_scores.items()
-        if score == max_score
+def _find_explicit_project(
+    user_request,
+    projects,
+):
+    matches = [
+        project
+        for project in projects
+        if _project_is_explicitly_named(
+            user_request,
+            project,
+        )
     ]
 
-    if len(top_projects) == 1:
+    if len(matches) == 1:
+        project = matches[0]
+
         return {
-            "project": top_projects[0],
-            "confidence": "medium",
+            "project": project,
+            "confidence": HIGH_CONFIDENCE,
             "reason": (
-                f"GitHub evidence for '{top_projects[0]}' "
-                f"overlaps with the user request."
+                f"Project '{project}' was explicitly named "
+                "in the user request."
             ),
         }
 
+    if len(matches) > 1:
+        return {
+            "project": UNKNOWN_PROJECT,
+            "confidence": LOW_CONFIDENCE,
+            "reason": (
+                "Multiple known projects were explicitly named "
+                "in the user request."
+            ),
+        }
+
+    return None
+
+
+def _score_github_projects(
+    user_request,
+    github_activity,
+):
+    request_tokens = tokenize(user_request)
+
+    if not request_tokens:
+        return {}
+
+    scores = {}
+
+    for activity in github_activity:
+        project = _clean_project_name(
+            activity.get("project")
+        )
+
+        if not project:
+            continue
+
+        activity_text = " ".join(
+            [
+                activity.get("repository", ""),
+                activity.get("subject", ""),
+                activity.get("summary", ""),
+                activity.get("activity", ""),
+            ]
+        )
+
+        activity_tokens = tokenize(
+            activity_text
+        )
+
+        overlap = request_tokens.intersection(
+            activity_tokens
+        )
+
+        if not overlap:
+            continue
+
+        score = len(overlap) / len(
+            request_tokens
+        )
+
+        scores[project] = (
+            scores.get(project, 0.0) + score
+        )
+
+    return scores
+
+
+def _resolve_from_scores(scores):
+    if not scores:
+        return {
+            "project": UNKNOWN_PROJECT,
+            "confidence": LOW_CONFIDENCE,
+            "reason": (
+                "No GitHub activity provides reliable evidence "
+                "for a specific project."
+            ),
+        }
+
+    highest_score = max(
+        scores.values()
+    )
+
+    top_projects = [
+        project
+        for project, score in scores.items()
+        if score == highest_score
+    ]
+
+    if len(top_projects) != 1:
+        return {
+            "project": UNKNOWN_PROJECT,
+            "confidence": LOW_CONFIDENCE,
+            "reason": (
+                "Multiple projects have equally strong supporting "
+                "evidence."
+            ),
+        }
+
+    project = top_projects[0]
+
     return {
-        "project": None,
-        "confidence": "low",
-        "reason": "Multiple possible projects.",
+        "project": project,
+        "confidence": MEDIUM_CONFIDENCE,
+        "reason": (
+            f"GitHub activity for '{project}' overlaps with "
+            "the user request."
+        ),
     }
+
+
+def resolve_project(
+    user_request,
+    context,
+):
+    """
+    Resolve the project most strongly supported by available context.
+
+    Resolution order:
+
+    1. Explicit project mention.
+    2. Deterministic GitHub activity overlap.
+
+    Ambiguous or unsupported matches are never forced.
+
+    This service contains no LLM logic.
+    """
+
+    if not user_request:
+        return {
+            "project": UNKNOWN_PROJECT,
+            "confidence": LOW_CONFIDENCE,
+            "reason": "No user request was provided.",
+        }
+
+    projects = _collect_known_projects(
+        context
+    )
+
+    if not projects:
+        return {
+            "project": UNKNOWN_PROJECT,
+            "confidence": LOW_CONFIDENCE,
+            "reason": (
+                "No known projects exist in the available context."
+            ),
+        }
+
+    explicit_match = _find_explicit_project(
+        user_request,
+        projects,
+    )
+
+    if explicit_match:
+        return explicit_match
+
+    scores = _score_github_projects(
+        user_request,
+        context.get(
+            "github_activity",
+            [],
+        ),
+    )
+
+    return _resolve_from_scores(scores)
